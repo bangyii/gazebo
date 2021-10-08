@@ -188,6 +188,7 @@ namespace gazebo
       /// \brief Used in World::Step and World::Fini
       public: std::mutex stepMutex;
 
+      /// \brief Condvar used to signal step is happening, synchronise processmessages thread
       public: std::condition_variable stepCondVar;
 
       /// \brief Used by World classs in following calls:

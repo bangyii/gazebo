@@ -16,7 +16,6 @@
 */
 #include <sstream>
 #include <limits>
-#include <chrono>
 #include <algorithm>
 
 #include "gazebo/common/BVHLoader.hh"
@@ -96,13 +95,11 @@ void Actor::Load(sdf::ElementPtr _sdf)
   this->SetName(actorName);
 
   // Parse skin
-  auto parse_skin_time = std::chrono::system_clock::now();
   if (_sdf->HasElement("skin"))
   {
     // Only load skeleton animations if we get a skeleton from the skin
     if (this->LoadSkin(_sdf->GetElement("skin")) && this->skeleton)
     {
-      gzmsg << "parse_skin_time " << (std::chrono::system_clock::now() - parse_skin_time).count()/1000000000.0 << "\n";
       // If there are no user-defined animations, but skin has animation
       if (!_sdf->HasElement("animation") && !this->skinFile.empty() &&
           this->skeleton->GetAnimation(0))
@@ -127,9 +124,7 @@ void Actor::Load(sdf::ElementPtr _sdf)
         sdf::ElementPtr animSdf = _sdf->GetElement("animation");
         while (animSdf)
         {
-          auto load_anim_time = std::chrono::system_clock::now();
           this->LoadAnimation(animSdf);
-          gzmsg << "load_anim_time " << (std::chrono::system_clock::now() - load_anim_time).count()/1000000000.0 << "\n";
           animSdf = animSdf->GetNextElement("animation");
         }
       }
@@ -147,12 +142,9 @@ void Actor::Load(sdf::ElementPtr _sdf)
     this->LoadScript(_sdf->GetElement("script"));
 
   // Load all links, including the new ones added when loading the skin
-  auto model_actor_load_time = std::chrono::system_clock::now();
   Model::Load(_sdf);
-  gzmsg << "model_actor_load_time " << (std::chrono::system_clock::now() - model_actor_load_time).count()/1000000000.0 << "\n";
 
   // If there is a skin, check that the skin visual was created and save its id
-  auto skin_id_time = std::chrono::system_clock::now();
   std::string actorLinkName = actorName + "::" + actorName + "_pose";
   LinkPtr actorLinkPtr = Model::GetLink(actorLinkName);
   if (actorLinkPtr)
@@ -167,7 +159,6 @@ void Actor::Load(sdf::ElementPtr _sdf)
           << std::endl;
     }
   }
-  gzmsg << "skin_id_time " << (std::chrono::system_clock::now() - skin_id_time).count()/1000000000.0 << "\n";
 
   // Advertise skeleton pose info
   this->bonePosePub = this->node->Advertise<msgs::PoseAnimation>(
@@ -177,7 +168,6 @@ void Actor::Load(sdf::ElementPtr _sdf)
 //////////////////////////////////////////////////
 bool Actor::LoadSkin(sdf::ElementPtr _skinSdf)
 {
-  auto get_mesh_time = std::chrono::system_clock::now();
   this->skinFile = _skinSdf->Get<std::string>("filename");
   this->skinScale = _skinSdf->Get<double>("scale");
 
@@ -213,10 +203,7 @@ bool Actor::LoadSkin(sdf::ElementPtr _skinSdf)
   this->AddActorVisual(linkSdf, actorName + "_visual",
       ignition::math::Pose3d::Zero);
       
-  gzmsg << "get_mesh_time " << (std::chrono::system_clock::now() - get_mesh_time).count()/1000000000.0 << "\n";
-
   // Create spherical links for each skeleton node
-  auto mod_nodes_time = std::chrono::system_clock::now();
   auto nodes = this->skeleton->GetNodes();
 
   /**
@@ -344,7 +331,6 @@ bool Actor::LoadSkin(sdf::ElementPtr _skinSdf)
   //   //   }
   //   // }
   // }
-  gzmsg << "mod_nodes_time " << (std::chrono::system_clock::now() - mod_nodes_time).count()/1000000000.0 << "\n";
   return true;
 }
 

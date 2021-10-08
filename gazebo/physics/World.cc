@@ -25,7 +25,6 @@
 #include <deque>
 #include <list>
 #include <set>
-#include <chrono>
 #include <string>
 #include <vector>
 
@@ -707,7 +706,6 @@ void World::SetSensorWaitFunc(std::function<void(double, double)> _func)
 //////////////////////////////////////////////////
 void World::Step()
 {
-  auto start = std::chrono::system_clock::now();
   DIAG_TIMER_START("World::Step");
 
   IGN_PROFILE("World::Step");
@@ -731,16 +729,13 @@ void World::Step()
   DIAG_TIMER_LAP("World::Step", "loadPlugins");
 
   IGN_PROFILE_BEGIN("publishWorldStats");
-  auto publish_start = std::chrono::system_clock::now();
   // Send statistics about the world simulation
   this->PublishWorldStats();
   IGN_PROFILE_END();
-  gzmsg << "Publish time " << (std::chrono::system_clock::now() - publish_start).count()/1000000000.0 << "\n";
 
   DIAG_TIMER_LAP("World::Step", "publishWorldStats");
 
   IGN_PROFILE_BEGIN("sleepOffset");
-  auto sleep_start = std::chrono::system_clock::now();
   if (this->dataPtr->waitForSensors)
     this->dataPtr->waitForSensors(this->dataPtr->simTime.Double(),
         this->dataPtr->physicsEngine->GetMaxStepSize());
@@ -766,10 +761,8 @@ void World::Step()
 
   IGN_PROFILE_END();
   DIAG_TIMER_LAP("World::Step", "sleepOffset");
-  gzmsg << "Sleep time " << (std::chrono::system_clock::now() - sleep_start).count()/1000000000.0 << "\n";
 
   IGN_PROFILE_BEGIN("worldUpdateMutex");
-  auto update_start = std::chrono::system_clock::now();
   // throttling update rate, with sleepOffset as tolerance
   // the tolerance is needed as the sleep time is not exact
   if (common::Time::GetWallTime() - this->dataPtr->prevStepWallTime +
@@ -805,25 +798,19 @@ void World::Step()
     }
   }
   IGN_PROFILE_END();
-  gzmsg << "Update time " << (std::chrono::system_clock::now() - update_start).count()/1000000000.0 << "\n";
   this->dataPtr->stepCondVar.notify_all();
 
   IGN_PROFILE_BEGIN("Step");
 
-  auto notify_start = std::chrono::system_clock::now();
   gazebo::util::IntrospectionManager::Instance()->NotifyUpdates();
-  gzmsg << "Notify time " << (std::chrono::system_clock::now() - notify_start).count()/1000000000.0 << "\n";
 
-  // auto process_start = std::chrono::system_clock::now();
   // this->ProcessMessages();
-  // gzmsg << "Process messages time " << (std::chrono::system_clock::now() - process_start).count()/1000000000.0 << "\n";
 
   DIAG_TIMER_STOP("World::Step");
 
   if (g_clearModels)
     this->ClearModels();
   IGN_PROFILE_END();
-  gzmsg << "Step time " << (std::chrono::system_clock::now() - start).count()/1000000000.0 << "\n";
 }
 
 //////////////////////////////////////////////////
@@ -1301,40 +1288,23 @@ LightPtr World::LoadLight(const sdf::ElementPtr &_sdf, const BasePtr &_parent)
 //////////////////////////////////////////////////
 ActorPtr World::LoadActor(sdf::ElementPtr _sdf , BasePtr _parent)
 {
-  gzmsg << "LOAD ACTOR\n";
-  auto set_world = std::chrono::system_clock::now();
   ActorPtr actor(new Actor(_parent));
   actor->SetWorld(shared_from_this());
-  gzmsg << "Set world time " << (std::chrono::system_clock::now() - set_world).count()/1000000000.0 << "\n";
 
-  auto load_time = std::chrono::system_clock::now();
   actor->Load(_sdf);
-  gzmsg << "load_time " << (std::chrono::system_clock::now() - load_time).count()/1000000000.0 << "\n";
 
-  auto add_time = std::chrono::system_clock::now();
   event::Events::addEntity(actor->GetScopedName());
-  gzmsg << "add_time " << (std::chrono::system_clock::now() - add_time).count()/1000000000.0 << "\n";
 
   msgs::Model msg;
-  auto fille_time = std::chrono::system_clock::now();
   actor->FillMsg(msg);
-  gzmsg << "fille_time " << (std::chrono::system_clock::now() - fille_time).count()/1000000000.0 << "\n";
 
-  auto publish_time = std::chrono::system_clock::now();
   this->dataPtr->modelPub->Publish(msg);
-  gzmsg << "publish_time " << (std::chrono::system_clock::now() - publish_time).count()/1000000000.0 << "\n";
 
-  auto enable_all_time = std::chrono::system_clock::now();
   this->EnableAllModels();
-  gzmsg << "enable_all_time " << (std::chrono::system_clock::now() - enable_all_time).count()/1000000000.0 << "\n";
 
-  auto publish_pose_time = std::chrono::system_clock::now();
   this->PublishModelPose(actor);
-  gzmsg << "publish_pose_time " << (std::chrono::system_clock::now() - publish_pose_time).count()/1000000000.0 << "\n";
   
-  auto push_back_time = std::chrono::system_clock::now();
   this->dataPtr->models.push_back(actor);
-  gzmsg << "push_back_time " << (std::chrono::system_clock::now() - push_back_time).count()/1000000000.0 << "\n";
 
   return actor;
 }
@@ -2153,7 +2123,6 @@ void World::ProcessLightFactoryMsgs()
 void World::ProcessFactoryMsgs()
 {
   //TODO: Process factory msgs optimization
-  auto clone_time = std::chrono::system_clock::now();
   std::list<sdf::ElementPtr> modelsToLoad, lightsToLoad;
 
   std::list<msgs::Factory> factoryMsgsCopy;
@@ -2166,11 +2135,9 @@ void World::ProcessFactoryMsgs()
     this->dataPtr->factoryMsgs.clear();
   }
 
-  gzmsg << "Number of factory messages " << factoryMsgsCopy.size() << "\n";
   for (auto const &factoryMsg : factoryMsgsCopy)
   {
 
-    auto factory_parse_time = std::chrono::system_clock::now();
     this->dataPtr->factorySDF->Clear();
 
     if (factoryMsg.has_sdf() && !factoryMsg.sdf().empty())
@@ -2233,9 +2200,7 @@ void World::ProcessFactoryMsgs()
         << "No SDF or SDF filename specified.\n";
       continue;
     }
-    gzmsg << "factory_parse_time " << (std::chrono::system_clock::now() - factory_parse_time).count()/1000000000.0 << "\n";
 
-    auto factory_check_time = std::chrono::system_clock::now();
     if (factoryMsg.has_edit_name())
     {
       BasePtr base(
@@ -2301,12 +2266,8 @@ void World::ProcessFactoryMsgs()
       if (isActor)
       {
         ActorPtr actor = this->LoadActor(elem, this->dataPtr->rootElement);
-        auto load_plugin_time = std::chrono::system_clock::now();
         actor->LoadPlugins();
-        gzmsg << "load_plugin_time " << (std::chrono::system_clock::now() - load_plugin_time).count()/1000000000.0 << "\n";
-        auto init_time = std::chrono::system_clock::now();
         actor->Init();
-        gzmsg << "init_time " << (std::chrono::system_clock::now() - init_time).count()/1000000000.0 << "\n";
       }
       else if (isModel)
       {
@@ -2341,7 +2302,6 @@ void World::ProcessFactoryMsgs()
         lightsToLoad.push_back(elem);
       }
     }
-    gzmsg << "factory_check_time " << (std::chrono::system_clock::now() - factory_check_time).count()/1000000000.0 << "\n";
   }
 
   // Load models
@@ -2776,16 +2736,12 @@ bool World::OnLog(std::ostringstream &_stream)
 //////////////////////////////////////////////////
 void World::ProcessMessages()
 {
-  // static auto prev = std::chrono::system_clock::now();
   while (this->Running())
   {
     std::mutex m;
     std::unique_lock<std::mutex> lk(m);
     this->dataPtr->stepCondVar.wait(lk);
-    // if((std::chrono::system_clock::now() - prev).count() / 1000000000.0 < 0.01)
-    //   continue;
     {
-      auto start = std::chrono::system_clock::now();
       std::lock_guard<std::recursive_mutex> lock(this->dataPtr->receiveMutex);
 
       if ((this->dataPtr->posePub && this->dataPtr->posePub->HasConnections()) ||
@@ -2868,11 +2824,9 @@ void World::ProcessMessages()
 
       this->dataPtr->publishModelPoses.clear();
       this->dataPtr->publishLightPoses.clear();
-      gzmsg << "Process first lock " << (std::chrono::system_clock::now() - start).count() / 1000000000.0 << "\n";
     }
 
     {
-      auto start = std::chrono::system_clock::now();
       std::lock_guard<std::recursive_mutex> lock(this->dataPtr->receiveMutex);
 
       if (this->dataPtr->modelPub && this->dataPtr->modelPub->HasConnections())
@@ -2938,14 +2892,11 @@ void World::ProcessMessages()
         }
       }
       this->dataPtr->publishModelScales.clear();
-      gzmsg << "Process second lock " << (std::chrono::system_clock::now() - start).count() / 1000000000.0 << "\n";
     }
 
     if (common::Time::GetWallTime() - this->dataPtr->prevProcessMsgsTime >
         this->dataPtr->processMsgsPeriod)
     {
-      // std::lock_guard<std::recursive_mutex> lock(this->dataPtr->worldUpdateMutex);
-      auto start = std::chrono::system_clock::now();
       this->ProcessPlaybackControlMsgs();
       this->ProcessEntityMsgs();
       this->ProcessRequestMsgs();
@@ -2954,10 +2905,7 @@ void World::ProcessMessages()
       this->ProcessLightFactoryMsgs();
       this->ProcessLightModifyMsgs();
       this->dataPtr->prevProcessMsgsTime = common::Time::GetWallTime();
-      gzmsg << "Process if update time " << (std::chrono::system_clock::now() - start).count() / 1000000000.0 << "\n";
     }
-
-    // prev = std::chrono::system_clock::now();
   }
 }
 
