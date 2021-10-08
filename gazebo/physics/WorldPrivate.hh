@@ -71,6 +71,9 @@ namespace gazebo
       /// \brief thread in which the world is updated.
       public: std::thread *thread;
 
+      /// \brief thread in which the messages are processed.
+      public: std::thread *process_msgs_thread;
+
       /// \brief True to stop the world from running.
       public: bool stop;
 
@@ -184,6 +187,8 @@ namespace gazebo
 
       /// \brief Used in World::Step and World::Fini
       public: std::mutex stepMutex;
+
+      public: std::condition_variable stepCondVar;
 
       /// \brief Used by World classs in following calls:
       /// World::Step for then entire function

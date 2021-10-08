@@ -25,6 +25,7 @@
 #include <deque>
 #include <list>
 #include <set>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -513,6 +514,8 @@ void World::Run(const unsigned int _iterations)
   this->dataPtr->stopIterations = _iterations;
 
   this->dataPtr->thread = new std::thread(std::bind(&World::RunLoop, this));
+  this->dataPtr->process_msgs_thread = new std::thread(std::bind(&World::ProcessMessages, this));
+  this->dataPtr->process_msgs_thread->detach();
 }
 
 //////////////////////////////////////////////////
@@ -704,6 +707,7 @@ void World::SetSensorWaitFunc(std::function<void(double, double)> _func)
 //////////////////////////////////////////////////
 void World::Step()
 {
+  auto start = std::chrono::system_clock::now();
   DIAG_TIMER_START("World::Step");
 
   IGN_PROFILE("World::Step");
@@ -727,13 +731,16 @@ void World::Step()
   DIAG_TIMER_LAP("World::Step", "loadPlugins");
 
   IGN_PROFILE_BEGIN("publishWorldStats");
+  auto publish_start = std::chrono::system_clock::now();
   // Send statistics about the world simulation
   this->PublishWorldStats();
   IGN_PROFILE_END();
+  gzmsg << "Publish time " << (std::chrono::system_clock::now() - publish_start).count()/1000000000.0 << "\n";
 
   DIAG_TIMER_LAP("World::Step", "publishWorldStats");
 
   IGN_PROFILE_BEGIN("sleepOffset");
+  auto sleep_start = std::chrono::system_clock::now();
   if (this->dataPtr->waitForSensors)
     this->dataPtr->waitForSensors(this->dataPtr->simTime.Double(),
         this->dataPtr->physicsEngine->GetMaxStepSize());
@@ -759,8 +766,10 @@ void World::Step()
 
   IGN_PROFILE_END();
   DIAG_TIMER_LAP("World::Step", "sleepOffset");
+  gzmsg << "Sleep time " << (std::chrono::system_clock::now() - sleep_start).count()/1000000000.0 << "\n";
 
   IGN_PROFILE_BEGIN("worldUpdateMutex");
+  auto update_start = std::chrono::system_clock::now();
   // throttling update rate, with sleepOffset as tolerance
   // the tolerance is needed as the sleep time is not exact
   if (common::Time::GetWallTime() - this->dataPtr->prevStepWallTime +
@@ -796,18 +805,25 @@ void World::Step()
     }
   }
   IGN_PROFILE_END();
+  gzmsg << "Update time " << (std::chrono::system_clock::now() - update_start).count()/1000000000.0 << "\n";
+  this->dataPtr->stepCondVar.notify_all();
 
   IGN_PROFILE_BEGIN("Step");
 
+  auto notify_start = std::chrono::system_clock::now();
   gazebo::util::IntrospectionManager::Instance()->NotifyUpdates();
+  gzmsg << "Notify time " << (std::chrono::system_clock::now() - notify_start).count()/1000000000.0 << "\n";
 
-  this->ProcessMessages();
+  // auto process_start = std::chrono::system_clock::now();
+  // this->ProcessMessages();
+  // gzmsg << "Process messages time " << (std::chrono::system_clock::now() - process_start).count()/1000000000.0 << "\n";
 
   DIAG_TIMER_STOP("World::Step");
 
   if (g_clearModels)
     this->ClearModels();
   IGN_PROFILE_END();
+  gzmsg << "Step time " << (std::chrono::system_clock::now() - start).count()/1000000000.0 << "\n";
 }
 
 //////////////////////////////////////////////////
@@ -1285,19 +1301,40 @@ LightPtr World::LoadLight(const sdf::ElementPtr &_sdf, const BasePtr &_parent)
 //////////////////////////////////////////////////
 ActorPtr World::LoadActor(sdf::ElementPtr _sdf , BasePtr _parent)
 {
+  gzmsg << "LOAD ACTOR\n";
+  auto set_world = std::chrono::system_clock::now();
   ActorPtr actor(new Actor(_parent));
   actor->SetWorld(shared_from_this());
-  actor->Load(_sdf);
+  gzmsg << "Set world time " << (std::chrono::system_clock::now() - set_world).count()/1000000000.0 << "\n";
 
+  auto load_time = std::chrono::system_clock::now();
+  actor->Load(_sdf);
+  gzmsg << "load_time " << (std::chrono::system_clock::now() - load_time).count()/1000000000.0 << "\n";
+
+  auto add_time = std::chrono::system_clock::now();
   event::Events::addEntity(actor->GetScopedName());
+  gzmsg << "add_time " << (std::chrono::system_clock::now() - add_time).count()/1000000000.0 << "\n";
 
   msgs::Model msg;
+  auto fille_time = std::chrono::system_clock::now();
   actor->FillMsg(msg);
-  this->dataPtr->modelPub->Publish(msg);
+  gzmsg << "fille_time " << (std::chrono::system_clock::now() - fille_time).count()/1000000000.0 << "\n";
 
+  auto publish_time = std::chrono::system_clock::now();
+  this->dataPtr->modelPub->Publish(msg);
+  gzmsg << "publish_time " << (std::chrono::system_clock::now() - publish_time).count()/1000000000.0 << "\n";
+
+  auto enable_all_time = std::chrono::system_clock::now();
   this->EnableAllModels();
+  gzmsg << "enable_all_time " << (std::chrono::system_clock::now() - enable_all_time).count()/1000000000.0 << "\n";
+
+  auto publish_pose_time = std::chrono::system_clock::now();
   this->PublishModelPose(actor);
+  gzmsg << "publish_pose_time " << (std::chrono::system_clock::now() - publish_pose_time).count()/1000000000.0 << "\n";
+  
+  auto push_back_time = std::chrono::system_clock::now();
   this->dataPtr->models.push_back(actor);
+  gzmsg << "push_back_time " << (std::chrono::system_clock::now() - push_back_time).count()/1000000000.0 << "\n";
 
   return actor;
 }
@@ -2115,6 +2152,8 @@ void World::ProcessLightFactoryMsgs()
 //////////////////////////////////////////////////
 void World::ProcessFactoryMsgs()
 {
+  //TODO: Process factory msgs optimization
+  auto clone_time = std::chrono::system_clock::now();
   std::list<sdf::ElementPtr> modelsToLoad, lightsToLoad;
 
   std::list<msgs::Factory> factoryMsgsCopy;
@@ -2127,9 +2166,11 @@ void World::ProcessFactoryMsgs()
     this->dataPtr->factoryMsgs.clear();
   }
 
+  gzmsg << "Number of factory messages " << factoryMsgsCopy.size() << "\n";
   for (auto const &factoryMsg : factoryMsgsCopy)
   {
 
+    auto factory_parse_time = std::chrono::system_clock::now();
     this->dataPtr->factorySDF->Clear();
 
     if (factoryMsg.has_sdf() && !factoryMsg.sdf().empty())
@@ -2192,7 +2233,9 @@ void World::ProcessFactoryMsgs()
         << "No SDF or SDF filename specified.\n";
       continue;
     }
+    gzmsg << "factory_parse_time " << (std::chrono::system_clock::now() - factory_parse_time).count()/1000000000.0 << "\n";
 
+    auto factory_check_time = std::chrono::system_clock::now();
     if (factoryMsg.has_edit_name())
     {
       BasePtr base(
@@ -2258,8 +2301,12 @@ void World::ProcessFactoryMsgs()
       if (isActor)
       {
         ActorPtr actor = this->LoadActor(elem, this->dataPtr->rootElement);
-        actor->Init();
+        auto load_plugin_time = std::chrono::system_clock::now();
         actor->LoadPlugins();
+        gzmsg << "load_plugin_time " << (std::chrono::system_clock::now() - load_plugin_time).count()/1000000000.0 << "\n";
+        auto init_time = std::chrono::system_clock::now();
+        actor->Init();
+        gzmsg << "init_time " << (std::chrono::system_clock::now() - init_time).count()/1000000000.0 << "\n";
       }
       else if (isModel)
       {
@@ -2294,6 +2341,7 @@ void World::ProcessFactoryMsgs()
         lightsToLoad.push_back(elem);
       }
     }
+    gzmsg << "factory_check_time " << (std::chrono::system_clock::now() - factory_check_time).count()/1000000000.0 << "\n";
   }
 
   // Load models
@@ -2728,170 +2776,188 @@ bool World::OnLog(std::ostringstream &_stream)
 //////////////////////////////////////////////////
 void World::ProcessMessages()
 {
+  // static auto prev = std::chrono::system_clock::now();
+  while (this->Running())
   {
-    std::lock_guard<std::recursive_mutex> lock(this->dataPtr->receiveMutex);
-
-    if ((this->dataPtr->posePub && this->dataPtr->posePub->HasConnections()) ||
-      // When ready to use the direct API for updating scene poses from server,
-      // uncomment the following line:
-         this->dataPtr->updateScenePoses ||
-        (this->dataPtr->poseLocalPub &&
-         this->dataPtr->poseLocalPub->HasConnections()))
+    std::mutex m;
+    std::unique_lock<std::mutex> lk(m);
+    this->dataPtr->stepCondVar.wait(lk);
+    // if((std::chrono::system_clock::now() - prev).count() / 1000000000.0 < 0.01)
+    //   continue;
     {
-      msgs::PosesStamped msg;
+      auto start = std::chrono::system_clock::now();
+      std::lock_guard<std::recursive_mutex> lock(this->dataPtr->receiveMutex);
 
-      // Time stamp this PosesStamped message
-      msgs::Set(msg.mutable_time(), this->SimTime());
-
-      if (!this->dataPtr->publishModelPoses.empty() ||
-          !this->dataPtr->publishLightPoses.empty())
+      if ((this->dataPtr->posePub && this->dataPtr->posePub->HasConnections()) ||
+          // When ready to use the direct API for updating scene poses from server,
+          // uncomment the following line:
+          this->dataPtr->updateScenePoses ||
+          (this->dataPtr->poseLocalPub &&
+           this->dataPtr->poseLocalPub->HasConnections()))
       {
-        for (auto const &model : this->dataPtr->publishModelPoses)
+        msgs::PosesStamped msg;
+
+        // Time stamp this PosesStamped message
+        msgs::Set(msg.mutable_time(), this->SimTime());
+
+        if (!this->dataPtr->publishModelPoses.empty() ||
+            !this->dataPtr->publishLightPoses.empty())
         {
-          std::list<ModelPtr> modelList;
-          modelList.push_back(model);
-          while (!modelList.empty())
+          for (auto const &model : this->dataPtr->publishModelPoses)
           {
-            ModelPtr m = modelList.front();
-            modelList.pop_front();
+            std::list<ModelPtr> modelList;
+            modelList.push_back(model);
+            while (!modelList.empty())
+            {
+              ModelPtr m = modelList.front();
+              modelList.pop_front();
+              msgs::Pose *poseMsg = msg.add_pose();
+
+              // Publish the model's relative pose
+              poseMsg->set_name(m->GetScopedName());
+              poseMsg->set_id(m->GetId());
+              msgs::Set(poseMsg, m->RelativePose());
+
+              // Publish each of the model's child links relative poses
+              Link_V links = m->GetLinks();
+              for (auto const &link : links)
+              {
+                poseMsg = msg.add_pose();
+                poseMsg->set_name(link->GetScopedName());
+                poseMsg->set_id(link->GetId());
+                msgs::Set(poseMsg, link->RelativePose());
+              }
+
+              // add all nested models to the queue
+              Model_V models = m->NestedModels();
+              for (auto const &n : models)
+                modelList.push_back(n);
+            }
+          }
+
+          for (auto const &light : this->dataPtr->publishLightPoses)
+          {
             msgs::Pose *poseMsg = msg.add_pose();
 
-            // Publish the model's relative pose
-            poseMsg->set_name(m->GetScopedName());
-            poseMsg->set_id(m->GetId());
-            msgs::Set(poseMsg, m->RelativePose());
-
-            // Publish each of the model's child links relative poses
-            Link_V links = m->GetLinks();
-            for (auto const &link : links)
-            {
-              poseMsg = msg.add_pose();
-              poseMsg->set_name(link->GetScopedName());
-              poseMsg->set_id(link->GetId());
-              msgs::Set(poseMsg, link->RelativePose());
-            }
-
-            // add all nested models to the queue
-            Model_V models = m->NestedModels();
-            for (auto const &n : models)
-              modelList.push_back(n);
+            // Publish the light's pose
+            poseMsg->set_name(light->GetScopedName());
+            poseMsg->set_id(light->GetId());
+            msgs::Set(poseMsg, light->RelativePose());
           }
+
+          if (this->dataPtr->posePub && this->dataPtr->posePub->HasConnections())
+            this->dataPtr->posePub->Publish(msg);
         }
 
-        for (auto const &light : this->dataPtr->publishLightPoses)
+        if (this->dataPtr->poseLocalPub &&
+            this->dataPtr->poseLocalPub->HasConnections())
         {
-          msgs::Pose *poseMsg = msg.add_pose();
-
-          // Publish the light's pose
-          poseMsg->set_name(light->GetScopedName());
-          poseMsg->set_id(light->GetId());
-          msgs::Set(poseMsg, light->RelativePose());
+          // rendering::Scene depends on this timestamp, which is used by
+          // rendering sensors to time stamp their data
+          this->dataPtr->poseLocalPub->Publish(msg);
         }
 
-        if (this->dataPtr->posePub && this->dataPtr->posePub->HasConnections())
-          this->dataPtr->posePub->Publish(msg);
+        // When ready to use the direct API for updating scene poses from server,
+        // uncomment the following lines:
+        // Execute callback to export Pose msg
+        if (this->dataPtr->updateScenePoses)
+        {
+          this->dataPtr->updateScenePoses(this->Name(), msg);
+        }
       }
 
-      if (this->dataPtr->poseLocalPub &&
-          this->dataPtr->poseLocalPub->HasConnections())
-      {
-        // rendering::Scene depends on this timestamp, which is used by
-        // rendering sensors to time stamp their data
-        this->dataPtr->poseLocalPub->Publish(msg);
-      }
-
-      // When ready to use the direct API for updating scene poses from server,
-      // uncomment the following lines:
-      // Execute callback to export Pose msg
-      if (this->dataPtr->updateScenePoses)
-      {
-        this->dataPtr->updateScenePoses(this->Name(), msg);
-      }
+      this->dataPtr->publishModelPoses.clear();
+      this->dataPtr->publishLightPoses.clear();
+      gzmsg << "Process first lock " << (std::chrono::system_clock::now() - start).count() / 1000000000.0 << "\n";
     }
 
-    this->dataPtr->publishModelPoses.clear();
-    this->dataPtr->publishLightPoses.clear();
-  }
-
-  {
-    std::lock_guard<std::recursive_mutex> lock(this->dataPtr->receiveMutex);
-
-    if (this->dataPtr->modelPub && this->dataPtr->modelPub->HasConnections())
     {
-      if (!this->dataPtr->publishModelScales.empty())
+      auto start = std::chrono::system_clock::now();
+      std::lock_guard<std::recursive_mutex> lock(this->dataPtr->receiveMutex);
+
+      if (this->dataPtr->modelPub && this->dataPtr->modelPub->HasConnections())
       {
-        for (auto const &model : this->dataPtr->publishModelScales)
+        if (!this->dataPtr->publishModelScales.empty())
         {
-          std::list<ModelPtr> modelList;
-          modelList.push_back(model);
-          while (!modelList.empty())
+          for (auto const &model : this->dataPtr->publishModelScales)
           {
-            ModelPtr m = modelList.front();
-            modelList.pop_front();
-
-            // add all nested models to the queue
-            Model_V models = m->NestedModels();
-            for (auto const &n : models)
-              modelList.push_back(n);
-
-            // Publish the model's scale and visual geometry data at the same
-            // time to fix race condition on rendering side when updating
-            // visuals
-            msgs::Model msg;
-            msg.set_name(m->GetScopedName());
-            msg.set_id(m->GetId());
-            Link_V links = m->GetLinks();
-            for (auto l : links)
+            std::list<ModelPtr> modelList;
+            modelList.push_back(model);
+            while (!modelList.empty())
             {
-              msgs::Link *linkMsg = msg.add_link();
-              linkMsg->set_id(l->GetId());
-              linkMsg->set_name(l->GetScopedName());
+              ModelPtr m = modelList.front();
+              modelList.pop_front();
 
-              // tmpMsg is unused. The Link::FillMsg call is made in order to
-              // keep link's visual msgs up-to-date with latest sdf values.
-              // The for loop below does the actual copy of visual geom msg.
+              // add all nested models to the queue
+              Model_V models = m->NestedModels();
+              for (auto const &n : models)
+                modelList.push_back(n);
+
+              // Publish the model's scale and visual geometry data at the same
+              // time to fix race condition on rendering side when updating
+              // visuals
+              msgs::Model msg;
+              msg.set_name(m->GetScopedName());
+              msg.set_id(m->GetId());
+              Link_V links = m->GetLinks();
+              for (auto l : links)
               {
-                msgs::Link tmpMsg;
-                l->FillMsg(tmpMsg);
+                msgs::Link *linkMsg = msg.add_link();
+                linkMsg->set_id(l->GetId());
+                linkMsg->set_name(l->GetScopedName());
+
+                // tmpMsg is unused. The Link::FillMsg call is made in order to
+                // keep link's visual msgs up-to-date with latest sdf values.
+                // The for loop below does the actual copy of visual geom msg.
+                {
+                  msgs::Link tmpMsg;
+                  l->FillMsg(tmpMsg);
+                }
+
+                auto visualMsgs = l->Visuals();
+                for (auto v : visualMsgs)
+                {
+                  if (!v.second.has_geometry())
+                    continue;
+                  msgs::Visual *visualMsg = linkMsg->add_visual();
+                  visualMsg->set_name(v.second.name());
+                  visualMsg->set_id(v.second.id());
+                  visualMsg->set_parent_name(v.second.parent_name());
+                  visualMsg->set_parent_id(v.second.parent_id());
+                  auto geomMsg = visualMsg->mutable_geometry();
+                  geomMsg->CopyFrom(v.second.geometry());
+                }
               }
 
-              auto visualMsgs = l->Visuals();
-              for (auto v : visualMsgs)
-              {
-                if (!v.second.has_geometry())
-                  continue;
-                msgs::Visual *visualMsg = linkMsg->add_visual();
-                visualMsg->set_name(v.second.name());
-                visualMsg->set_id(v.second.id());
-                visualMsg->set_parent_name(v.second.parent_name());
-                visualMsg->set_parent_id(v.second.parent_id());
-                auto geomMsg = visualMsg->mutable_geometry();
-                geomMsg->CopyFrom(v.second.geometry());
-              }
+              // set scale
+              msgs::Set(msg.mutable_scale(), m->Scale());
+
+              this->dataPtr->modelPub->Publish(msg);
             }
-
-            // set scale
-            msgs::Set(msg.mutable_scale(), m->Scale());
-
-            this->dataPtr->modelPub->Publish(msg);
           }
         }
       }
+      this->dataPtr->publishModelScales.clear();
+      gzmsg << "Process second lock " << (std::chrono::system_clock::now() - start).count() / 1000000000.0 << "\n";
     }
-    this->dataPtr->publishModelScales.clear();
-  }
 
-  if (common::Time::GetWallTime() - this->dataPtr->prevProcessMsgsTime >
-      this->dataPtr->processMsgsPeriod)
-  {
-    this->ProcessPlaybackControlMsgs();
-    this->ProcessEntityMsgs();
-    this->ProcessRequestMsgs();
-    this->ProcessFactoryMsgs();
-    this->ProcessModelMsgs();
-    this->ProcessLightFactoryMsgs();
-    this->ProcessLightModifyMsgs();
-    this->dataPtr->prevProcessMsgsTime = common::Time::GetWallTime();
+    if (common::Time::GetWallTime() - this->dataPtr->prevProcessMsgsTime >
+        this->dataPtr->processMsgsPeriod)
+    {
+      // std::lock_guard<std::recursive_mutex> lock(this->dataPtr->worldUpdateMutex);
+      auto start = std::chrono::system_clock::now();
+      this->ProcessPlaybackControlMsgs();
+      this->ProcessEntityMsgs();
+      this->ProcessRequestMsgs();
+      this->ProcessFactoryMsgs();
+      this->ProcessModelMsgs();
+      this->ProcessLightFactoryMsgs();
+      this->ProcessLightModifyMsgs();
+      this->dataPtr->prevProcessMsgsTime = common::Time::GetWallTime();
+      gzmsg << "Process if update time " << (std::chrono::system_clock::now() - start).count() / 1000000000.0 << "\n";
+    }
+
+    // prev = std::chrono::system_clock::now();
   }
 }
 

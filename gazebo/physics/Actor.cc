@@ -16,6 +16,7 @@
 */
 #include <sstream>
 #include <limits>
+#include <chrono>
 #include <algorithm>
 
 #include "gazebo/common/BVHLoader.hh"
@@ -95,11 +96,13 @@ void Actor::Load(sdf::ElementPtr _sdf)
   this->SetName(actorName);
 
   // Parse skin
+  auto parse_skin_time = std::chrono::system_clock::now();
   if (_sdf->HasElement("skin"))
   {
     // Only load skeleton animations if we get a skeleton from the skin
     if (this->LoadSkin(_sdf->GetElement("skin")) && this->skeleton)
     {
+      gzmsg << "parse_skin_time " << (std::chrono::system_clock::now() - parse_skin_time).count()/1000000000.0 << "\n";
       // If there are no user-defined animations, but skin has animation
       if (!_sdf->HasElement("animation") && !this->skinFile.empty() &&
           this->skeleton->GetAnimation(0))
@@ -124,7 +127,9 @@ void Actor::Load(sdf::ElementPtr _sdf)
         sdf::ElementPtr animSdf = _sdf->GetElement("animation");
         while (animSdf)
         {
+          auto load_anim_time = std::chrono::system_clock::now();
           this->LoadAnimation(animSdf);
+          gzmsg << "load_anim_time " << (std::chrono::system_clock::now() - load_anim_time).count()/1000000000.0 << "\n";
           animSdf = animSdf->GetNextElement("animation");
         }
       }
@@ -142,9 +147,12 @@ void Actor::Load(sdf::ElementPtr _sdf)
     this->LoadScript(_sdf->GetElement("script"));
 
   // Load all links, including the new ones added when loading the skin
+  auto model_actor_load_time = std::chrono::system_clock::now();
   Model::Load(_sdf);
+  gzmsg << "model_actor_load_time " << (std::chrono::system_clock::now() - model_actor_load_time).count()/1000000000.0 << "\n";
 
   // If there is a skin, check that the skin visual was created and save its id
+  auto skin_id_time = std::chrono::system_clock::now();
   std::string actorLinkName = actorName + "::" + actorName + "_pose";
   LinkPtr actorLinkPtr = Model::GetLink(actorLinkName);
   if (actorLinkPtr)
@@ -159,6 +167,7 @@ void Actor::Load(sdf::ElementPtr _sdf)
           << std::endl;
     }
   }
+  gzmsg << "skin_id_time " << (std::chrono::system_clock::now() - skin_id_time).count()/1000000000.0 << "\n";
 
   // Advertise skeleton pose info
   this->bonePosePub = this->node->Advertise<msgs::PoseAnimation>(
@@ -168,6 +177,7 @@ void Actor::Load(sdf::ElementPtr _sdf)
 //////////////////////////////////////////////////
 bool Actor::LoadSkin(sdf::ElementPtr _skinSdf)
 {
+  auto get_mesh_time = std::chrono::system_clock::now();
   this->skinFile = _skinSdf->Get<std::string>("filename");
   this->skinScale = _skinSdf->Get<double>("scale");
 
@@ -202,85 +212,139 @@ bool Actor::LoadSkin(sdf::ElementPtr _skinSdf)
   this->visualName = actorLinkName + "::" + actorName + "_visual";
   this->AddActorVisual(linkSdf, actorName + "_visual",
       ignition::math::Pose3d::Zero);
+      
+  gzmsg << "get_mesh_time " << (std::chrono::system_clock::now() - get_mesh_time).count()/1000000000.0 << "\n";
 
   // Create spherical links for each skeleton node
+  auto mod_nodes_time = std::chrono::system_clock::now();
   auto nodes = this->skeleton->GetNodes();
-  for (auto iter : nodes)
+
+  /**
+   * THREADED CODE
+   **/
+  uint threads = std::thread::hardware_concurrency();
+  auto iter = nodes.begin();
+  std::vector<std::unique_ptr<std::thread>> threadVec(threads);
+  std::mutex iter_mutex;
+
+  //Start thread for each pointer
+  for(auto &thr_ptr : threadVec)
   {
-    SkeletonNode *bone = iter.second;
+    thr_ptr.reset(new std::thread([&](){
+      SkeletonNode *bone;
+      sdf::ElementPtr linkSdf_;
+      while(true){
+        //Lock mutex, get iter then advance iter
+        {
+          std::lock_guard<std::mutex> lock(iter_mutex);
+          if(iter == nodes.end())
+            break;
+          bone = iter->second;
+          ++iter;
 
-    // Add link element
-    linkSdf = _skinSdf->GetParent()->AddElement("link");
+          // Add link element
+          linkSdf_ = _skinSdf->GetParent()->AddElement("link");
+        }
 
-    // Set default properties
-    linkSdf->GetAttribute("name")->Set(bone->GetName());
-    linkSdf->GetElement("gravity")->Set(false);
-    linkSdf->GetElement("self_collide")->Set(false);
+        // Set default properties
+        linkSdf_->GetAttribute("name")->Set(bone->GetName());
+        linkSdf_->GetElement("gravity")->Set(false);
+        linkSdf_->GetElement("self_collide")->Set(false);
 
-    // Set pose
-    ignition::math::Pose3d pose(bone->ModelTransform().Translation(),
-                                bone->ModelTransform().Rotation());
-    if (bone->IsRootNode())
-      pose = ignition::math::Pose3d::Zero;
-
-    linkSdf->GetElement("pose")->Set(pose);
-
-    // FIXME hardcoded inertia of a sphere with mass 1.0 and radius 0.01
-    // Do we even need inertial info in an actor?
-    this->AddSphereInertia(linkSdf, ignition::math::Pose3d::Zero, 1.0, 0.01);
-
-    // FIXME hardcoded visual to red sphere with radius 0.02
-    if (bone->IsRootNode())
-    {
-      this->AddSphereVisual(linkSdf, bone->GetName() + "__SKELETON_VISUAL__",
-          ignition::math::Pose3d::Zero, 0.02, "Gazebo/Blue",
-          ignition::math::Color::Blue);
-    }
-    else if (bone->GetChildCount() == 0)
-    {
-      this->AddSphereVisual(linkSdf, bone->GetName() +
-          "__SKELETON_VISUAL__", ignition::math::Pose3d::Zero, 0.02,
-          "Gazebo/Yellow", ignition::math::Color::Yellow);
-    }
-    else
-    {
-      this->AddSphereVisual(linkSdf, bone->GetName() +
-          "__SKELETON_VISUAL__", ignition::math::Pose3d::Zero, 0.02,
-          "Gazebo/Red", ignition::math::Color::Red);
-    }
-
-    // Create a box visual representing each bone
-    for (unsigned int i = 0; i < bone->GetChildCount(); ++i)
-    {
-      SkeletonNode *curChild = bone->GetChild(i);
-
-      ignition::math::Vector3d dir =
-          curChild->ModelTransform().Translation() -
-          bone->ModelTransform().Translation();
-      double length = dir.Length();
-
-      if (!ignition::math::equal(length, 0.0))
-      {
-        ignition::math::Vector3d r = curChild->Transform().Translation();
-        ignition::math::Vector3d linkPos =
-            ignition::math::Vector3d(r.X() / 2.0, r.Y() / 2.0, r.Z() / 2.0);
-        double theta = atan2(dir.Y(), dir.X());
-        double phi = acos(dir.Z() / length);
-
-        ignition::math::Pose3d bonePose(linkPos,
-            ignition::math::Quaterniond(0.0, phi, theta));
-        bonePose.Rot() = pose.Rot().Inverse() * bonePose.Rot();
-
-        this->AddBoxVisual(linkSdf, bone->GetName() + "_" +
-          curChild->GetName() + "__SKELETON_VISUAL__", bonePose,
-          ignition::math::Vector3d(0.02, 0.02, length),
-          "Gazebo/Green", ignition::math::Color::Green);
-        this->AddBoxCollision(linkSdf,
-            bone->GetName() + "_" + curChild->GetName() + "_collision",
-            bonePose, ignition::math::Vector3d(0.02, 0.02, length));
+        // Set pose
+        ignition::math::Pose3d pose(bone->ModelTransform().Translation(),
+                                    bone->ModelTransform().Rotation());
+        if (bone->IsRootNode())
+          pose = ignition::math::Pose3d::Zero;
+        linkSdf_->GetElement("pose")->Set(pose);
       }
-    }
+    }));
   }
+
+  for(auto &thr_ptr : threadVec)
+    thr_ptr->join();
+
+  /**
+   * LINEAR CODE
+   **/
+
+  // for (auto iter : nodes)
+  // {
+  //   SkeletonNode *bone = iter.second;
+
+  //   // Add link element
+  //   linkSdf = _skinSdf->GetParent()->AddElement("link");
+
+  //   // Set default properties
+  //   linkSdf->GetAttribute("name")->Set(bone->GetName());
+  //   linkSdf->GetElement("gravity")->Set(false);
+  //   linkSdf->GetElement("self_collide")->Set(false);
+
+  //   // Set pose
+  //   ignition::math::Pose3d pose(bone->ModelTransform().Translation(),
+  //                               bone->ModelTransform().Rotation());
+  //   if (bone->IsRootNode())
+  //     pose = ignition::math::Pose3d::Zero;
+
+  //   linkSdf->GetElement("pose")->Set(pose);
+
+  //   // // FIXME hardcoded inertia of a sphere with mass 1.0 and radius 0.01
+  //   // // Do we even need inertial info in an actor?
+  //   // this->AddSphereInertia(linkSdf, ignition::math::Pose3d::Zero, 1.0, 0.01);
+
+  //   // // FIXME hardcoded visual to red sphere with radius 0.02
+  //   // if (bone->IsRootNode())
+  //   // {
+  //   //   this->AddSphereVisual(linkSdf, bone->GetName() + "__SKELETON_VISUAL__",
+  //   //       ignition::math::Pose3d::Zero, 0.02, "Gazebo/Blue",
+  //   //       ignition::math::Color::Blue);
+  //   // }
+  //   // else if (bone->GetChildCount() == 0)
+  //   // {
+  //   //   this->AddSphereVisual(linkSdf, bone->GetName() +
+  //   //       "__SKELETON_VISUAL__", ignition::math::Pose3d::Zero, 0.02,
+  //   //       "Gazebo/Yellow", ignition::math::Color::Yellow);
+  //   // }
+  //   // else
+  //   // {
+  //   //   this->AddSphereVisual(linkSdf, bone->GetName() +
+  //   //       "__SKELETON_VISUAL__", ignition::math::Pose3d::Zero, 0.02,
+  //   //       "Gazebo/Red", ignition::math::Color::Red);
+  //   // }
+
+  //   // // Create a box visual representing each bone
+  //   // for (unsigned int i = 0; i < bone->GetChildCount(); ++i)
+  //   // {
+  //   //   SkeletonNode *curChild = bone->GetChild(i);
+
+  //   //   ignition::math::Vector3d dir =
+  //   //       curChild->ModelTransform().Translation() -
+  //   //       bone->ModelTransform().Translation();
+  //   //   double length = dir.Length();
+
+  //   //   if (!ignition::math::equal(length, 0.0))
+  //   //   {
+  //   //     ignition::math::Vector3d r = curChild->Transform().Translation();
+  //   //     ignition::math::Vector3d linkPos =
+  //   //         ignition::math::Vector3d(r.X() / 2.0, r.Y() / 2.0, r.Z() / 2.0);
+  //   //     double theta = atan2(dir.Y(), dir.X());
+  //   //     double phi = acos(dir.Z() / length);
+
+  //   //     ignition::math::Pose3d bonePose(linkPos,
+  //   //         ignition::math::Quaterniond(0.0, phi, theta));
+  //   //     bonePose.Rot() = pose.Rot().Inverse() * bonePose.Rot();
+
+  //   //     this->AddBoxVisual(linkSdf, bone->GetName() + "_" +
+  //   //       curChild->GetName() + "__SKELETON_VISUAL__", bonePose,
+  //   //       ignition::math::Vector3d(0.02, 0.02, length),
+  //   //       "Gazebo/Green", ignition::math::Color::Green);
+  //   //     this->AddBoxCollision(linkSdf,
+  //   //         bone->GetName() + "_" + curChild->GetName() + "_collision",
+  //   //         bonePose, ignition::math::Vector3d(0.02, 0.02, length));
+  //   //   }
+  //   // }
+  // }
+  gzmsg << "mod_nodes_time " << (std::chrono::system_clock::now() - mod_nodes_time).count()/1000000000.0 << "\n";
   return true;
 }
 
@@ -673,6 +737,9 @@ bool Actor::IsActive() const
 ///////////////////////////////////////////////////
 void Actor::Update()
 {
+  if(this->mainLink != this->GetChildLink(this->GetName() + "_pose"))
+    return;
+
   common::Time currentTime = this->world->SimTime();
   if (!this->active)
   {
@@ -731,7 +798,7 @@ void Actor::Update()
     if (tinfo == nullptr)
     {
       gzerr << "Trajectory not found at time [" << this->scriptTime << "]"
-          << std::endl;
+          << this->visualName << std::endl;
       return;
     }
     this->scriptTime = this->scriptTime - tinfo->startTime;
